@@ -112,36 +112,61 @@ def _get_app_dir() -> Path:
 _APP_DIR = _get_app_dir()
 
 # ── constants ─────────────────────────────────────────────────────────────────
+# DriverDex uses TWO GitHub repositories, both writable with the same token:
+#   1. rhshourav/driverdex  → manifests (per-category) + drivedex_index.json
+#   2. rhshourav/drivers     → the driver archive (.zip / .7z volumes) ONLY
+# Manifests point at the drivers repo for every archive URL, so consumers pull
+# metadata from driverdex and the actual bytes from drivers.
 REPO_OWNER          = "rhshourav"
-REPO_NAME           = "driverdex"
+REPO_NAME           = "driverdex"                                   # manifests + index
 GH_BRANCH           = "main"
+
+# ── Drivers repo (archives live here, never removed) ──────────────────────────
+DRIVERS_REPO_OWNER  = "rhshourav"
+DRIVERS_REPO_NAME   = "drivers"
+DRIVERS_GH_BRANCH   = "main"
+
 MANIFEST_DIR        = "manifests"                                   # all manifests live here
 INSTALLER_MANIFEST_REL = f"{MANIFEST_DIR}/installers.manifest.json"
 DRIVERS_DIR         = "drivers"
 SPLIT_BYTES         = 15 * 1024 * 1024
 SCHEMA_VER          = "3.0"
-APP_VER             = "5.4.0-rest"
+APP_VER             = "5.5.0-split"
 COMMIT_EMAIL        = "driverdex-builder@noreply.local"
 COMMIT_NAME         = "DriverDex-Builder"
 
 API_BASE            = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+DRIVERS_API_BASE    = f"https://api.github.com/repos/{DRIVERS_REPO_OWNER}/{DRIVERS_REPO_NAME}"
+
+# LFS batch endpoint for the driverdex repo (kept for backwards-compat / meta).
 LFS_BATCH_URL = (
     f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git/info/lfs/objects/batch"
+)
+# LFS batch endpoint for the drivers repo — archives are stored/verified here.
+DRIVERS_LFS_BATCH_URL = (
+    f"https://github.com/{DRIVERS_REPO_OWNER}/{DRIVERS_REPO_NAME}.git/info/lfs/objects/batch"
 )
 
 WORKSPACE_DIR       = _APP_DIR / "drivedex_workspace"
 
 MANIFEST_SIZE_LIMIT = 15 * 1024 * 1024
+# drivedex_index.json (and its shards) must never exceed this. When the active
+# index shard would cross it, a new part (drivedex_index.2.json, .3.json …) is
+# started; existing parts are never rewritten or trimmed.
+INDEX_SIZE_LIMIT    = 15 * 1024 * 1024
 INDEX_FILE_NAME     = "drivedex_index.json"
 
 BADGE_MARKER_START  = "<!-- DRIVERDEX_DRIVER_BADGE_START -->"
 BADGE_MARKER_END    = "<!-- DRIVERDEX_DRIVER_BADGE_END -->"
 
+# Archive URLs resolve against the drivers repo (raw content of the drivers/ tree).
 BASE_RAW_URL = (
-    f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{DRIVERS_DIR}"
+    f"https://raw.githubusercontent.com/{DRIVERS_REPO_OWNER}/{DRIVERS_REPO_NAME}"
+    f"/{DRIVERS_GH_BRANCH}/{DRIVERS_DIR}"
 )
+# Manifest URLs resolve against the driverdex repo.
 MANIFEST_RAW_BASE = (
-    f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main"
+    f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{GH_BRANCH}"
 )
 
 C = Console(highlight=False)
@@ -1695,7 +1720,7 @@ def zip_and_upload_pipeline(
     pack_dir_by_type : Dict[str, Path]            = {}
     total_verified   = 0
 
-    lfs_batch_url = LFS_BATCH_URL
+    lfs_batch_url = DRIVERS_LFS_BATCH_URL
 
     def _upload_lfs_file(repo_rel: str, fpath: Path) -> bool:
         raw_bytes = fpath.read_bytes()
@@ -2224,7 +2249,7 @@ def _parse_lfs_pointer(data: bytes) -> Optional[Dict[str, str]]:
 
 
 def _download_via_lfs_batch(repo_rel_path: str, oid: str, size: int, local_dest: Path) -> str:
-    lfs_url = LFS_BATCH_URL
+    lfs_url = DRIVERS_LFS_BATCH_URL
     payload = json.dumps({
         "operation": "download", "transfers": ["basic"],
         "objects": [{"oid": oid, "size": size}],
@@ -2269,9 +2294,14 @@ def _download_file_from_github(
     repo_rel_path: str, local_dest: Path,
     max_attempts: int = 4, timeout: int = 90,
 ) -> str:
+    # Archives live in the drivers repo; manifests/index live in driverdex.
+    if repo_rel_path.replace("\\", "/").startswith(f"{DRIVERS_DIR}/"):
+        _o, _n, _b = DRIVERS_REPO_OWNER, DRIVERS_REPO_NAME, DRIVERS_GH_BRANCH
+    else:
+        _o, _n, _b = REPO_OWNER, REPO_NAME, GH_BRANCH
     raw_url = (
-        f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}"
-        f"/{GH_BRANCH}/{repo_rel_path}"
+        f"https://raw.githubusercontent.com/{_o}/{_n}"
+        f"/{_b}/{repo_rel_path}"
     )
     headers: Dict[str, str] = {}
     tok = _load_token()
@@ -2401,28 +2431,46 @@ def github_commit_push(
     commit_msg           : str,
     upload_mode          : str = UPLOAD_MODE_PARALLEL,
     skip_archive_upload  : bool = False,
+    repo_owner           : str = REPO_OWNER,
+    repo_name            : str = REPO_NAME,
+    branch               : str = GH_BRANCH,
+    lfs_batch_url        : str = LFS_BATCH_URL,
+    only_prefix          : Optional[str] = None,
+    exclude_prefix       : Optional[str] = None,
 ) -> bool:
+    """
+    Commit the (filtered) contents of `workspace` to a single GitHub repo.
+
+    DriverDex commits to two repos, so this is called twice per run:
+      • drivers  repo  → only_prefix="drivers/"     (archive volumes)
+      • driverdex repo → exclude_prefix="drivers/"   (manifests + index)
+
+    `only_prefix` keeps ONLY repo-relative paths under that prefix; `exclude_prefix`
+    drops any path under it. Existing remote files are never touched — a new commit
+    is layered on top of the current HEAD tree, so nothing is ever removed.
+    """
+    repo_slug = f"{repo_owner}/{repo_name}"
     # ── 1. HEAD ref ───────────────────────────────────────────────────────────
-    with C.status("[bold bright_cyan]  Fetching HEAD ref …[/bold bright_cyan]", spinner="dots12"):
+    with C.status(f"[bold bright_cyan]  Fetching HEAD ref ({repo_slug}) …[/bold bright_cyan]", spinner="dots12"):
         st, ref_data = _api_with_retry(
-            "GET", f"/repos/{REPO_OWNER}/{REPO_NAME}/git/ref/heads/{GH_BRANCH}", label="HEAD ref"
+            "GET", f"/repos/{repo_owner}/{repo_name}/git/ref/heads/{branch}", label="HEAD ref"
         )
     if st != 200:
-        err(f"Cannot read HEAD ref (HTTP {st}): {ref_data.get('message', '')}")
+        err(f"Cannot read HEAD ref for {repo_slug} (HTTP {st}): {ref_data.get('message', '')}")
         hint(diagnose_api_error(st, ref_data))
         return False
     head_sha = ref_data["object"]["sha"]
 
     # ── 2. Base tree SHA ──────────────────────────────────────────────────────
     st, commit_data = _api_with_retry(
-        "GET", f"/repos/{REPO_OWNER}/{REPO_NAME}/git/commits/{head_sha}", label="HEAD commit"
+        "GET", f"/repos/{repo_owner}/{repo_name}/git/commits/{head_sha}", label="HEAD commit"
     )
     if st != 200:
-        err(f"Cannot read HEAD commit (HTTP {st})")
+        err(f"Cannot read HEAD commit for {repo_slug} (HTTP {st})")
         return False
     base_tree_sha = commit_data["tree"]["sha"]
 
-    # ── 3. Collect files ──────────────────────────────────────────────────────
+    # ── 3. Collect files (filtered by prefix) ─────────────────────────────────
     files: List[Tuple[str, Path]] = []
     for fpath in sorted(workspace.rglob("*")):
         if not fpath.is_file():
@@ -2432,10 +2480,14 @@ def github_commit_push(
         except ValueError:
             continue
         repo_rel = str(rel).replace("\\", "/")
+        if only_prefix is not None and not repo_rel.startswith(only_prefix):
+            continue
+        if exclude_prefix is not None and repo_rel.startswith(exclude_prefix):
+            continue
         files.append((repo_rel, fpath))
 
     if not files:
-        warn("Workspace is empty — nothing to upload.")
+        info(f"No files for {repo_slug} after filtering — nothing to upload.")
         return True
 
     _BLOB_RAW_LIMIT = 18 * 1024 * 1024
@@ -2518,7 +2570,7 @@ def github_commit_push(
         encoded   = base64.b64encode(raw_bytes).decode("ascii")
 
         st, blob = _api_with_retry(
-            "POST", f"/repos/{REPO_OWNER}/{REPO_NAME}/git/blobs",
+            "POST", f"/repos/{repo_owner}/{repo_name}/git/blobs",
             {"content": encoded, "encoding": "base64"},
             timeout=300, max_attempts=5,
             label=f"blob {Path(repo_rel).name}",
@@ -2538,7 +2590,7 @@ def github_commit_push(
         if st == 401:
             if _refresh_github_token(label=f"blob {Path(repo_rel).name}"):
                 st, blob = _api_with_retry(
-                    "POST", f"/repos/{REPO_OWNER}/{REPO_NAME}/git/blobs",
+                    "POST", f"/repos/{repo_owner}/{repo_name}/git/blobs",
                     {"content": encoded, "encoding": "base64"},
                     timeout=300, max_attempts=3,
                     label=f"blob-retry {Path(repo_rel).name}",
@@ -2682,7 +2734,7 @@ def github_commit_push(
 
         ok(f"Blobs: uploaded {len(lfs_tree_entries)} archive(s).")
 
-    # ── 4b. Upload metadata via blob API ─────────────────────────────────────
+    # ── 4b. Upload metadata via blob API ─���───────────────────────────────────
     blob_tree_entries: List[Dict] = []
     if meta_files:
         meta_prog = Progress(
@@ -2732,7 +2784,7 @@ def github_commit_push(
             spinner="dots12",
         ):
             st, tree = _api_with_retry(
-                "POST", f"/repos/{REPO_OWNER}/{REPO_NAME}/git/trees",
+                "POST", f"/repos/{repo_owner}/{repo_name}/git/trees",
                 {"base_tree": current_base, "tree": chunk},
                 timeout=300, max_attempts=7, backoff_base=8.0,
                 label=chunk_label,
@@ -2748,7 +2800,7 @@ def github_commit_push(
     # ── 6. Create commit ──────────────────────────────────────────────────────
     with C.status("[bold bright_cyan]  Creating commit …[/bold bright_cyan]", spinner="dots12"):
         st, new_commit = _api_with_retry(
-            "POST", f"/repos/{REPO_OWNER}/{REPO_NAME}/git/commits",
+            "POST", f"/repos/{repo_owner}/{repo_name}/git/commits",
             {
                 "message": commit_msg,
                 "tree"   : tree_sha,
@@ -2766,7 +2818,7 @@ def github_commit_push(
     with C.status("[bold bright_cyan]  Updating ref …[/bold bright_cyan]", spinner="dots12"):
         st, ref_resp = _api_with_retry(
             "PATCH",
-            f"/repos/{REPO_OWNER}/{REPO_NAME}/git/refs/heads/{GH_BRANCH}",
+            f"/repos/{repo_owner}/{repo_name}/git/refs/heads/{branch}",
             {"sha": new_commit["sha"], "force": False},
             timeout=60, max_attempts=5, label="update ref",
         )
@@ -2793,8 +2845,9 @@ def version_is_newer(new_ver: str, old_ver: str) -> bool:
 # ── Category-manifest naming ──────────────────────────────────────────────────
 def _category_manifest_rel(cat: str) -> str:
     safe = re.sub(r'[^A-Za-z0-9]', '', cat.strip()) or "Other"
-    # Repo-relative path, e.g. "manifests/Audio.manifest.json".
-    return f"{MANIFEST_DIR}/{safe}.manifest.json"
+    # Per-category folder, e.g. "manifests/Audio/Audio.manifest.json".
+    # Shards for the same category live alongside it in the same folder.
+    return f"{MANIFEST_DIR}/{safe}/{safe}.manifest.json"
 
 
 def _manifest_shard_paths_for(repo: Path, base_name: str) -> List[Path]:
@@ -2824,9 +2877,11 @@ def _all_category_manifest_rels(repo: Path) -> List[str]:
             found.append(rel)
             seen.add(rel)
 
-    # Pick up any extra category manifests living under manifests/ that aren't
-    # in the known-category list (excluding the installer manifest).
-    for p in sorted((repo / MANIFEST_DIR).glob("*.manifest.json")):
+    # Pick up any extra category manifests living under manifests/ (now in
+    # per-category subfolders) that aren't in the known-category list. Uses
+    # rglob so nested manifests/<Category>/<Category>.manifest.json are found.
+    # Shard files (…​.manifest.2.json) and the installer manifest are excluded.
+    for p in sorted((repo / MANIFEST_DIR).rglob("*.manifest.json")):
         rel = p.relative_to(repo).as_posix()
         if rel not in seen and rel != INSTALLER_MANIFEST_REL:
             found.append(rel)
@@ -2882,7 +2937,7 @@ def load_manifest(repo: Path, cat: str = "Other") -> Dict:
         "total_shards"   : 1,
         "updated"        : str(date.today()),
         "base_url"       : BASE_RAW_URL,
-        "lfs_batch_url"  : LFS_BATCH_URL,
+        "lfs_batch_url"  : DRIVERS_LFS_BATCH_URL,
         "drivers"        : [],
         "version_history": {},
     }
@@ -2894,7 +2949,7 @@ def save_manifest(m: Dict, repo: Path, cat: str = "") -> Path:
     m["updated"]       = str(date.today())
     m["schema"]        = SCHEMA_VER
     m["category"]      = cat
-    m["lfs_batch_url"] = LFS_BATCH_URL
+    m["lfs_batch_url"] = DRIVERS_LFS_BATCH_URL
     existing_shards = _manifest_shard_paths_for(repo, base_name)
     active_path = existing_shards[-1] if existing_shards else (repo / base_name)
     active_path.parent.mkdir(parents=True, exist_ok=True)   # ensure manifests/ exists
@@ -2931,7 +2986,7 @@ def save_manifest(m: Dict, repo: Path, cat: str = "") -> Path:
             "total_shards"   : idx,   # corrected below once the final count is known
             "updated"        : str(date.today()),
             "base_url"       : BASE_RAW_URL,
-            "lfs_batch_url"  : LFS_BATCH_URL,
+            "lfs_batch_url"  : DRIVERS_LFS_BATCH_URL,
             "drivers"        : [],
             "version_history": {},
         }
@@ -3107,7 +3162,7 @@ def load_installer_manifest(repo: Path) -> Dict:
         "shard_index"  : 1,
         "total_shards" : 1,
         "updated"      : str(date.today()),
-        "lfs_batch_url": LFS_BATCH_URL,
+        "lfs_batch_url": DRIVERS_LFS_BATCH_URL,
         "installers"   : [],
     }
 
@@ -3115,7 +3170,7 @@ def load_installer_manifest(repo: Path) -> Dict:
 def save_installer_manifest(m: Dict, repo: Path) -> Path:
     m["updated"]       = str(date.today())
     m["schema"]        = SCHEMA_VER
-    m["lfs_batch_url"] = LFS_BATCH_URL
+    m["lfs_batch_url"] = DRIVERS_LFS_BATCH_URL
     existing_shards = _installer_manifest_shard_paths(repo)
     active_path = existing_shards[-1] if existing_shards else (repo / INSTALLER_MANIFEST_REL)
     active_path.parent.mkdir(parents=True, exist_ok=True)   # ensure manifests/ exists
@@ -3142,7 +3197,7 @@ def save_installer_manifest(m: Dict, repo: Path) -> Path:
             "shard_index"  : idx,
             "total_shards" : idx,      # corrected below once final count is known
             "updated"      : str(date.today()),
-            "lfs_batch_url": LFS_BATCH_URL,
+            "lfs_batch_url": DRIVERS_LFS_BATCH_URL,
             "installers"   : [],
         }
 
@@ -3382,8 +3437,8 @@ def build_installer_entries(
             for pi in parts_info:
                 fname = pi.path.name
                 url   = (
-                    f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}"
-                    f"/{GH_BRANCH}/{dest_rel}/{fname}"
+            f"https://raw.githubusercontent.com/{DRIVERS_REPO_OWNER}/{DRIVERS_REPO_NAME}"
+            f"/{DRIVERS_GH_BRANCH}/{dest_rel}/{fname}"
                 )
                 part_meta.append({
                     "part_num"   : pi.part_num,
@@ -3428,8 +3483,8 @@ def build_installer_entries(
             }
         else:
             url = (
-                f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}"
-                f"/{GH_BRANCH}/{dest_rel}/{exe.name}"
+            f"https://raw.githubusercontent.com/{DRIVERS_REPO_OWNER}/{DRIVERS_REPO_NAME}"
+            f"/{DRIVERS_GH_BRANCH}/{dest_rel}/{exe.name}"
             )
             entry = {
                 "id"              : entry_id,
@@ -3458,10 +3513,24 @@ def build_installer_entries(
 
 # ── Index file (drivedex_index.json) ──────────────────────────────────────────
 def _load_index(repo: Path) -> Dict:
-    p = repo / INDEX_FILE_NAME
-    if p.exists():
+    """Load the index, merging all parts (drivedex_index.json + .N.json)."""
+    p1 = repo / INDEX_FILE_NAME
+    if p1.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            base = json.loads(p1.read_text(encoding="utf-8"))
+            total = int(base.get("total_parts", 1) or 1)
+            merged_shards = list(base.get("manifest_shards", []))
+            for part in range(2, total + 1):
+                pp = _index_part_path(repo, part)
+                if pp.exists():
+                    try:
+                        merged_shards.extend(
+                            json.loads(pp.read_text(encoding="utf-8")).get("manifest_shards", [])
+                        )
+                    except Exception:
+                        pass
+            base["manifest_shards"] = merged_shards
+            return base
         except Exception:
             pass
     return {
@@ -3509,20 +3578,104 @@ def _save_index(repo: Path) -> None:
             except Exception:
                 pass
 
-    idx_data = {
-        "schema"          : SCHEMA_VER,
-        "updated"         : str(date.today()),
-        "manifest_shards" : manifest_shards,
-        "category_summary": dict(sorted(category_summary.items())),
-    }
-    p = repo / INDEX_FILE_NAME
-    p.write_text(json.dumps(idx_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    cat_summary_sorted = dict(sorted(category_summary.items()))
+
+    # ── Write the index, sharding into parts so no file exceeds 15MB ──────────
+    # drivedex_index.json is part 1; overflow spills into drivedex_index.2.json,
+    # drivedex_index.3.json, … . manifest_shards (which only ever grows, since
+    # manifests are add-only) is chunked across parts; existing parts are simply
+    # overwritten in place and none are ever trimmed or deleted.
+    written = _write_index_parts(repo, manifest_shards, cat_summary_sorted)
 
     cat_str = "  ".join(f"{k}={v}" for k, v in sorted(category_summary.items()))
     n_cats = len(_all_category_manifest_rels(repo))
-    ok(f"{INDEX_FILE_NAME} updated  ({n_cats} category manifest(s) / {len(manifest_shards)} shard(s))")
+    part_note = f" across {len(written)} index part(s)" if len(written) > 1 else ""
+    ok(f"{INDEX_FILE_NAME} updated  ({n_cats} category manifest(s) / {len(manifest_shards)} shard(s){part_note})")
     if cat_str:
         info(f"Category summary: {cat_str}")
+
+
+def _index_part_path(repo: Path, part: int) -> Path:
+    # Part 1 keeps the canonical name; later parts get a numeral suffix.
+    if part <= 1:
+        return repo / INDEX_FILE_NAME
+    stem = INDEX_FILE_NAME[:-len(".json")] if INDEX_FILE_NAME.endswith(".json") else INDEX_FILE_NAME
+    return repo / f"{stem}.{part}.json"
+
+
+def _write_index_parts(
+    repo: Path,
+    manifest_shards: List[Dict],
+    category_summary: Dict[str, int],
+) -> List[Path]:
+    """
+    Serialize the index into one or more parts, each guaranteed to stay under
+    INDEX_SIZE_LIMIT (15MB). Returns the list of part paths written.
+
+    Nothing is ever removed: manifest_shards only grows run-over-run, so parts
+    only get appended. Each part records `part`, and part 1 records the running
+    `total_parts` plus the (small) category_summary; consumers follow parts in
+    order until `total_parts` is reached.
+    """
+    def _dump(obj: Dict) -> bytes:
+        return json.dumps(obj, indent=2, ensure_ascii=False).encode("utf-8")
+
+    # Part 1 additionally carries category_summary + an index_parts directory +
+    # next_part pointer. Those aren't known while packing (they depend on the
+    # final part count), so we reserve headroom for them and iterate until the
+    # part count stabilises, guaranteeing every written file stays under 15MB.
+    cat_summary_bytes = len(_dump(category_summary))
+
+    def _pack(part_reserve: int) -> List[List[Dict]]:
+        effective = max(1024, INDEX_SIZE_LIMIT - cat_summary_bytes - part_reserve)
+        parts: List[List[Dict]] = []
+        current: List[Dict] = []
+        for entry in manifest_shards:
+            trial = current + [entry]
+            if len(_dump({"manifest_shards": trial})) > effective and current:
+                parts.append(current)
+                current = [entry]
+            else:
+                current = trial
+        parts.append(current)  # always at least one part (may be empty on first run)
+        return parts
+
+    # Reserve ~64 bytes per part name for the index_parts directory + next_part.
+    reserve = 512
+    parts = _pack(reserve)
+    for _ in range(6):
+        needed = 512 + 64 * (len(parts) + 1)
+        if needed <= reserve:
+            break
+        reserve = needed
+        parts = _pack(reserve)
+
+    total_parts = len(parts)
+    written: List[Path] = []
+    for i, shard_slice in enumerate(parts):
+        part_num = i + 1
+        part_obj: Dict = {
+            "schema"          : SCHEMA_VER,
+            "updated"         : str(date.today()),
+            "part"            : part_num,
+            "total_parts"     : total_parts,
+            "manifest_shards" : shard_slice,
+        }
+        # category_summary rides in part 1 only. Consumers read part 1 first,
+        # then fetch parts 2..total_parts (drivedex_index.<N>.json) — following
+        # the `next_part` pointer or the naming convention — to reassemble the
+        # full manifest_shards list. No unbounded directory is embedded, so
+        # every part stays comfortably under the 15MB cap.
+        if part_num == 1:
+            part_obj["category_summary"] = category_summary
+        if part_num < total_parts:
+            part_obj["next_part"] = _index_part_path(repo, part_num + 1).relative_to(repo).as_posix()
+
+        pth = _index_part_path(repo, part_num)
+        pth.write_text(json.dumps(part_obj, indent=2, ensure_ascii=False), encoding="utf-8")
+        written.append(pth)
+
+    return written
 
 
 def _count_total_drivers(repo: Path) -> int:
@@ -3612,8 +3765,8 @@ def build_entries(
         for pi in parts_list:
             fname = pi.path.name
             url   = (
-                f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}"
-                f"/{GH_BRANCH}/{rel_dir}/{driver_type}/DP_{pack}/{fname}"
+            f"https://raw.githubusercontent.com/{DRIVERS_REPO_OWNER}/{DRIVERS_REPO_NAME}"
+            f"/{DRIVERS_GH_BRANCH}/{rel_dir}/{driver_type}/DP_{pack}/{fname}"
             )
             part_meta.append({
                 "part_num"  : pi.part_num,
@@ -3721,7 +3874,7 @@ def enrich_versions(
     return enriched_new, warnings
 
 
-# ── Pre-flight duplicate audit ────────────────────────────────────────────────
+# ─�� Pre-flight duplicate audit ────────────────────────────────────────────────
 _ACT_SKIP     = "skip"
 _ACT_REPLACE  = "replace"
 _ACT_KEEP_NEW = "keep_new"
@@ -4602,16 +4755,47 @@ def _process_one_pack(repo_dir: Path, pack_num: int) -> bool:
             f"({n_drv} driver(s), {n_inst} installer(s))  "
             f"via v{APP_VER}"
         )
-        push_ok = github_commit_push(
+        # ── Push 1/2 — archives → rhshourav/drivers (drivers/ only) ───────────
+        # Only the newly-built archive volumes are committed; the new commit is
+        # layered on top of the drivers repo HEAD, so existing archives stay.
+        info(f"[1/2] Uploading archives → github.com/{DRIVERS_REPO_OWNER}/{DRIVERS_REPO_NAME}")
+        push_drivers_ok = github_commit_push(
             workspace=repo_dir,
             commit_msg=commit_msg,
             upload_mode=upload_mode,
             skip_archive_upload=_pipeline_archives_uploaded,
+            repo_owner=DRIVERS_REPO_OWNER,
+            repo_name=DRIVERS_REPO_NAME,
+            branch=DRIVERS_GH_BRANCH,
+            lfs_batch_url=DRIVERS_LFS_BATCH_URL,
+            only_prefix=f"{DRIVERS_DIR}/",
         )
+
+        # ── Push 2/2 — manifests + index → rhshourav/driverdex (no drivers/) ──
+        # Everything except the archives: per-category manifests, index shards,
+        # README badge. Layered on top of driverdex HEAD → no entries removed.
+        info(f"[2/2] Uploading manifests + index → github.com/{REPO_OWNER}/{REPO_NAME}")
+        push_meta_ok = github_commit_push(
+            workspace=repo_dir,
+            commit_msg=commit_msg,
+            upload_mode=upload_mode,
+            skip_archive_upload=False,
+            repo_owner=REPO_OWNER,
+            repo_name=REPO_NAME,
+            branch=GH_BRANCH,
+            lfs_batch_url=LFS_BATCH_URL,
+            exclude_prefix=f"{DRIVERS_DIR}/",
+        )
+
+        push_ok = push_drivers_ok and push_meta_ok
 
         if push_ok:
             rb.disarm()
             ok(f"Push complete — {_count_total_drivers(repo_dir)} total drivers in repo.")
+        elif push_drivers_ok and not push_meta_ok:
+            err("Archives pushed to drivers repo, but manifest/index push to driverdex FAILED.")
+        elif push_meta_ok and not push_drivers_ok:
+            err("Manifests pushed to driverdex, but archive push to drivers repo FAILED.")
         else:
             err("Push failed — staged archives remain in workspace for manual recovery.")
 

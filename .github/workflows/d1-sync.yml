@@ -369,8 +369,14 @@ jobs:
           fi
           echo "sync_since=$SYNC_SINCE" >> "$GITHUB_OUTPUT"
 
-      - name: Run migration script (generate SQL chunks + cleanup diff)
+      - name: Run migration script (generate add-only SQL chunks)
         run: |
+          # ADD-ONLY SYNC: --clean is intentionally NOT passed. The D1 database
+          # is never diffed against local state and no DELETE-diff is emitted,
+          # so existing rows / old manifests are always preserved. Combined with
+          # the incremental --since window below, each run only upserts drivers
+          # newly added since the last successful sync.
+          #
           # sync_since (auto-incremental, push-only) and since_flag (manual,
           # workflow_dispatch-only) are mutually exclusive by event type, but
           # we resolve explicitly here to never pass --since twice.
@@ -382,7 +388,6 @@ jobs:
           python migrate_to_d1.py \
             --input-dir . \
             --output-dir ./d1_import \
-            --clean \
             --db-name "$D1_DB_NAME" \
             --commit-sha "${{ github.sha }}" \
             ${{ steps.flags.outputs.force_enabled_flag }} \
@@ -419,24 +424,10 @@ jobs:
             echo "OK: $file"
           done
 
-      - name: Apply cleanup chunks to D1 (purge obsolete rows)
-        if: ${{ inputs.dry_run != 'true' || github.event_name != 'workflow_dispatch' }}
-        run: |
-          set -e
-          shopt -s nullglob
-          cleanup_files=(./d1_import/d1_cleanup_part_*.sql)
-          if [ ${#cleanup_files[@]} -eq 0 ]; then
-            echo "No cleanup chunks to apply this run."
-            exit 0
-          fi
-          for file in "${cleanup_files[@]}"; do
-            echo "Applying cleanup $file ..."
-            if ! npx wrangler d1 execute "$D1_DB_NAME" --remote --file="$file"; then
-              echo "::error::Failed applying cleanup $file"
-              exit 1
-            fi
-            echo "OK: $file"
-          done
+      # NOTE: The "Apply cleanup chunks" step has been intentionally removed.
+      # This sync is ADD-ONLY: it never deletes rows or purges old manifests.
+      # migrate_to_d1.py is run without --clean, so no d1_cleanup_part_*.sql
+      # files are ever generated, and nothing existing in D1 is removed.
 
       # ------------------------------------------------------------------
       # 5b. Post-sync verification
