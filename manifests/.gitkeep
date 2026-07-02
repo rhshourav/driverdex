@@ -1,0 +1,12 @@
+# This folder holds all driver/installer manifest files for DriverDex.
+#
+# Files written here by the LDC Builder / AutoSync tools:
+#   <Category>.manifest.json            e.g. Audio.manifest.json, Network.manifest.json
+#   <Category>.manifest.2.json          overflow shards (>15 MB)
+#   installers.manifest.json            standalone installer packages
+#
+# The lightweight tracker `ldc_index.json` and the SQLite shards `drivers*.db`
+# remain at the repository root. Every consumer (DL.py downloader, the D1 sync
+# script, and the search worker) discovers manifests through `ldc_index.json`,
+# whose `manifest_shards[].filename` values are repo-relative paths such as
+# `manifests/Audio.manifest.json`.
