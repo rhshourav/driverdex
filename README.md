@@ -1,7 +1,7 @@
 # 🚀 DriverDex Builder
 
 <!-- DRIVERDEX_DRIVER_BADGE_START -->
-![Drivers](https://img.shields.io/badge/drivers-0-brightgreen?style=flat-square)
+![Drivers](https://img.shields.io/badge/drivers-6-brightgreen?style=flat-square)
 <!-- DRIVERDEX_DRIVER_BADGE_END -->
 
 **Deployment Badges**

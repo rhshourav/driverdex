@@ -1,0 +1,48 @@
+{
+  "schema": "3.0",
+  "category": "USB",
+  "shard_index": 1,
+  "total_shards": 1,
+  "updated": "2026-07-02",
+  "base_url": "https://raw.githubusercontent.com/rhshourav/drivers/main/drivers",
+  "lfs_batch_url": "https://github.com/rhshourav/drivers.git/info/lfs/objects/batch",
+  "drivers": [
+    {
+      "id": "drv-ade2c1c4e7a665be",
+      "pack": "INTEL_System_x86",
+      "type": "USB",
+      "provider": "INF-creator",
+      "category": "USB",
+      "version": "1.0.0002.4",
+      "arch": "x64",
+      "hwids": [
+        "ROOT\\BUSENUM"
+      ],
+      "compatible_ids": [
+        "ROOT\\BUSENUM"
+      ],
+      "descriptions": [
+        "Synology Inc",
+        "Synology Virtual USB Hub"
+      ],
+      "os_targets": [],
+      "zip": "https://raw.githubusercontent.com/rhshourav/drivers/main/drivers/USB/DP_INTEL_System_x86/infcreat-usb-x64-1.0.0002.4.7z.0001",
+      "zip_parts": 1,
+      "parts": [
+        {
+          "part_num": 1,
+          "filename": "infcreat-usb-x64-1.0.0002.4.7z.0001",
+          "size_bytes": 31358,
+          "sha256": "f60b549c384f9a26b31a019f9074418254cbb96db7ee456c2388749725f7865b",
+          "url": "https://raw.githubusercontent.com/rhshourav/drivers/main/drivers/USB/DP_INTEL_System_x86/infcreat-usb-x64-1.0.0002.4.7z.0001"
+        }
+      ],
+      "date_added": "2026-07-02",
+      "enabled": true,
+      "supersedes": null,
+      "superseded_by": null,
+      "notes": ""
+    }
+  ],
+  "version_history": {}
+}

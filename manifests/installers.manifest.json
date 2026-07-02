@@ -1,0 +1,40 @@
+{
+  "schema": "3.0",
+  "shard_index": 1,
+  "total_shards": 1,
+  "updated": "2026-07-02",
+  "lfs_batch_url": "https://github.com/rhshourav/drivers.git/info/lfs/objects/batch",
+  "installers": [
+    {
+      "id": "inst-1567700ee4b2",
+      "pack": "INTEL_System_x86",
+      "type": "Chipset",
+      "filename": "amd64",
+      "exe_filename": "ufma.exe",
+      "sha256": "efb3c3bf655969fff4a9e3a3ad4764cb6ed81703b1a3ec0bd78cc8222054e60f",
+      "size_bytes": 4161320,
+      "file_version": "1.0.0.46",
+      "product_version": "1.0.0.46",
+      "company": "AuthenTec, Inc.",
+      "description": "ufma",
+      "installer_type": "PE-installer",
+      "icon_sha256": "",
+      "is_dir_package": true,
+      "url": "https://raw.githubusercontent.com/rhshourav/drivers/main/drivers/Chipset/DP_INTEL_System_x86/amd64.7z.0001",
+      "split_parts": 1,
+      "parts": [
+        {
+          "part_num": 1,
+          "filename": "amd64.7z.0001",
+          "size_bytes": 2432650,
+          "sha256": "5ab08cd3d9379bd4ba868e5f56d7b2d8ae7b94da169db6ef161e40995b3f43dd",
+          "url": "https://raw.githubusercontent.com/rhshourav/drivers/main/drivers/Chipset/DP_INTEL_System_x86/amd64.7z.0001",
+          "lfs_oid": "5ab08cd3d9379bd4ba868e5f56d7b2d8ae7b94da169db6ef161e40995b3f43dd",
+          "lfs_size": 2432650
+        }
+      ],
+      "date_added": "2026-07-02",
+      "enabled": true
+    }
+  ]
+}

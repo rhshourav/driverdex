@@ -1,0 +1,31 @@
+{
+  "schema": "3.0",
+  "updated": "2026-07-02",
+  "part": 1,
+  "total_parts": 1,
+  "manifest_shards": [
+    {
+      "filename": "manifests/Chipset/Chipset.manifest.json",
+      "size_bytes": 13223,
+      "active": true,
+      "note": "active"
+    },
+    {
+      "filename": "manifests/Input/Input.manifest.json",
+      "size_bytes": 6574,
+      "active": true,
+      "note": "active"
+    },
+    {
+      "filename": "manifests/USB/USB.manifest.json",
+      "size_bytes": 1449,
+      "active": true,
+      "note": "active"
+    }
+  ],
+  "category_summary": {
+    "Chipset": 4,
+    "Input": 1,
+    "USB": 1
+  }
+}
